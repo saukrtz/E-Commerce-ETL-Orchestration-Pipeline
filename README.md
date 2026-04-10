@@ -1,40 +1,35 @@
 # E-Commerce ETL Orchestration Pipeline 🚀
 
-This repository contains a production-style, daily ETL pipeline for e-commerce transaction data. The pipeline is orchestrated using **Apache Airflow** and deployed on **Google Cloud Platform (Cloud Composer)**, with data transformations loading into **BigQuery**.
+This repository contains a production-style, daily ETL pipeline for e-commerce transaction data. [cite_start]The pipeline is orchestrated using **Apache Airflow** and deployed on **Google Cloud Platform (Cloud Composer)**, with data transformations loading into **BigQuery**[cite: 1, 4, 7].
 
 ## 🏗️ Architecture & Tech Stack
-* **Orchestrator:** Apache Airflow (Cloud Composer)
-* **Data Warehouse:** Google BigQuery
-* **Processing:** Python (Pandas/CSV)
-* **Storage:** Google Cloud Storage (GCS)
+* [cite_start]**Orchestrator:** Apache Airflow (Cloud Composer) [cite: 2, 7]
+* [cite_start]**Data Warehouse:** Google BigQuery [cite: 2, 6]
+* [cite_start]**Processing:** Python (CSV/Logic module) [cite: 27, 39]
+* [cite_start]**Storage:** Google Cloud Storage (GCS) [cite: 64]
 
 ## 📂 Project Structure
-The project is strictly modularized to separate orchestration from business logic:
+[cite_start]The project is strictly modularized to separate orchestration from business logic[cite: 38, 39]:
 
-* `etl_transactions_pipeline.py`: The main Airflow DAG. Uses the TaskFlow API and `TaskGroups` to clearly define the Extract, Transform, and Load stages.
-* `transaction_logic.py`: The pure Python business logic. Decoupled from the DAG to enable independent unit testing and keep the orchestrator lightweight.
-* `bigquery_queries.sql`: Highly optimized BigQuery SQL scripts for downstream reporting, utilizing `COUNTIF` and partition pruning.
-* `answers.txt`: Architectural documentation detailing Executor scaling strategies, Composer deployment, and GCP cost management.
+* `etl_transactions_pipeline.py`: The main Airflow DAG. [cite_start]Uses `TaskGroups` to define Extract, Transform, and Load stages[cite: 24, 25, 70].
+* `transaction_logic.py`: Pure Python business logic. [cite_start]Decoupled from the DAG to enable unit testing and keep the orchestrator lightweight[cite: 39, 71].
+* [cite_start]`bigquery_queries.sql`: Optimized SQL scripts for downstream reporting[cite: 55, 72].
+* [cite_start]`answers.txt`: Architectural documentation covering scaling and GCP deployment[cite: 73].
 
 ## ✨ Key Engineering Features
-* **Idempotent Execution:** Intermediate files are written to execution-date-scoped (`{{ ds }}`) paths. Rerunning a historical date will safely overwrite without duplicating data.
-* **Optimized State Transfer:** Prevents database bloat by passing lightweight file paths through XCom rather than serializing heavy DataFrames.
-* **TaskGroups over SubDAGs:** Eliminates worker deadlocks and performance overhead by utilizing UI-level grouping.
-* **Parallel Processing:** Independent transformations (like category summaries and return rates) are wired to execute concurrently.
-* **Data Warehouse Optimization:** The downstream BigQuery table is partitioned by `transaction_date` and clustered by `category` to drastically reduce query costs on large datasets.
+* [cite_start]**Idempotent Execution:** Intermediate files use execution-date-scoped paths to ensure reruns don't duplicate data[cite: 16, 42].
+* [cite_start]**Optimized State Transfer:** Passes file paths through XCom rather than heavy DataFrames to prevent database bloat[cite: 41, 42].
+* [cite_start]**TaskGroups over SubDAGs:** Eliminates worker deadlocks by utilizing UI-level grouping[cite: 25, 36].
+* [cite_start]**SLA Monitoring:** Includes a 1-hour SLA to catch performance regressions[cite: 44].
+* [cite_start]**Partitioning & Clustering:** BigQuery tables are partitioned by `transaction_date` and clustered by `category` for cost-efficient querying[cite: 59, 60].
 
 ## 🚀 Deployment (Cloud Composer)
-1. Upload `ecommerce_transactions.csv` to your designated GCS data bucket.
-2. Update the `RAW_CSV_PATH` in the DAG file to match your environment.
-3. Drop `etl_transactions_pipeline.py` and `transaction_logic.py` into the `/dags` folder of your Cloud Composer bucket.
-4. The pipeline is scheduled to run `@daily` with an SLA of 1 hour.
-
-## Installation
-* pip install -r requirements.txt
+1. [cite_start]Upload `ecommerce_transactions.csv` to your GCS data bucket[cite: 12, 19].
+2. [cite_start]Update `RAW_CSV_PATH` in the DAG file[cite: 27, 28].
+3. [cite_start]Drop `etl_transactions_pipeline.py` and `transaction_logic.py` into the `/dags` folder[cite: 64, 71].
+4. Run `pip install -r requirements.txt` for local testing.
 
 ## 🗺️ System Architecture
-
-[cite_start]The pipeline orchestrates the flow of data from raw flat files in Cloud Storage[cite: 6, 62].
 
 ```mermaid
 graph TD
@@ -49,21 +44,3 @@ graph TD
     Composer -->|1. Stages Raw Data| BQ_Stage
     Composer -->|2. Local Python Transforms| Composer
     Composer -->|3. Loads Aggregated Data| BQ_Report
-
-graph LR
-    subgraph 1. Extract Group
-        A[validate_schema] --> B[load_to_staging]
-    end
-    
-    subgraph 2. Transform Group
-        C[compute_net_revenue] --> D[compute_category_summary]
-        C --> E[compute_return_rate]
-    end
-    
-    subgraph 3. Load Group
-        F[write_to_reporting_table] --> G[update_run_log]
-    end
-
-    1. Extract Group --> 2. Transform Group
-    2. Transform Group --> 3. Load Group
-
