@@ -34,7 +34,7 @@ The project is strictly modularized to separate orchestration from business logi
 
 ## 🗺️ System Architecture
 
-The pipeline orchestrates the flow of data from raw flat files in Cloud Storage, through Python-based transformation workers, and finally into an optimized BigQuery data warehouse.
+[cite_start]The pipeline orchestrates the flow of data from raw flat files in Cloud Storage[cite: 6, 62].
 
 ```mermaid
 graph TD
@@ -49,7 +49,6 @@ graph TD
     Composer -->|1. Stages Raw Data| BQ_Stage
     Composer -->|2. Local Python Transforms| Composer
     Composer -->|3. Loads Aggregated Data| BQ_Report
-
 
 graph LR
     subgraph 1. Extract Group
