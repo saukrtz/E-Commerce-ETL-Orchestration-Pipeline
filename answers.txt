@@ -1,0 +1,357 @@
+================================================================================
+answers.txt
+Project 3: ETL Orchestration & Data Warehouse Pipeline
+================================================================================
+
+
+--------------------------------------------------------------------------------
+TASK 1 — TASK GROUPS AND SUBDAGS (Airflow M7)
+--------------------------------------------------------------------------------
+
+Q: Why did SubDAGs fall out of favour? What problem does TaskGroup solve that SubDAGs did not?
+
+SubDAGs were originally designed to clean up the Airflow UI, but they introduced
+massive architectural headaches. Because a SubDAG was technically a DAG within a 
+DAG, it required its own executor slots. This frequently caused worker deadlocks—
+the parent DAG would take up a worker slot waiting for the SubDAG to finish, but 
+the SubDAG couldn't run because all the worker slots were full. They were also 
+notoriously slow to execute.
+
+TaskGroups solved this by being a purely UI-level abstraction. They group tasks 
+visually in the Airflow interface to keep things clean, but under the hood, the 
+scheduler just sees them as normal, top-level tasks. No extra executors, no 
+deadlocks, and zero performance overhead.
+
+
+--------------------------------------------------------------------------------
+TASK 2 — BEST PRACTICES (Airflow M8)
+--------------------------------------------------------------------------------
+
+Q8. Why move business logic to transaction_logic.py?
+
+Keeping logic out of the DAG file is one of those things that seems optional
+until you're six months in and trying to debug a pipeline at 2am. The DAG file
+is essentially a wiring diagram — it should describe *what* runs and *in what
+order*, not *how* anything is computed. When compute functions live inside the
+DAG, testing them requires spinning up an Airflow context. When they live in a
+plain Python module, you can unit-test them with a simple pytest call and no
+Airflow dependency at all. It also prevents the DAG file from ballooning into
+something unreadable, and means multiple DAGs can share the same logic module
+without duplicating code.
+
+----
+
+Q9. Why pass file paths through XCom instead of DataFrames?
+
+XCom (cross-communication) is backed by Airflow's metadata database. It was
+designed to carry small signals — a filename, a record count, a status flag —
+not entire datasets. If you push a pandas DataFrame containing 50,000 rows into
+XCom, you're serialising potentially hundreds of megabytes into a database table
+that was never meant to hold it. That slows down the scheduler, risks hitting
+size limits, and means the pipeline state is locked inside Airflow's DB rather
+than an observable file.
+
+The idempotency angle matters too. When a task writes its output to a
+date-scoped file path (e.g. /tmp/ecomm_etl/2024-04-03/enriched_transactions.csv)
+and passes only that path via XCom, re-running the task simply overwrites the
+same file. Nothing accumulates. The pipeline reaches the same end state no
+matter how many times it runs for a given date, which is exactly what idempotent
+means in practice.
+
+----
+
+Q10. Naming convention chosen and why.
+
+All task_ids follow the pattern: <group>.<verb>_<noun> in snake_case.
+Examples: extract.validate_schema, transform.compute_net_revenue,
+load.write_to_reporting_table.
+
+The group prefix appears automatically in Airflow's UI when using TaskGroups,
+so the name stays readable both in code and in the graph view. The verb-first
+convention (validate, compute, write) makes it immediately obvious what a task
+*does* rather than just what it touches. Consistency matters because task_ids
+are also used as references in xcom_pull() calls — if naming is inconsistent,
+those references become a source of subtle bugs.
+
+----
+
+Q11. What happens when an SLA is missed in Airflow?
+
+An SLA (Service Level Agreement) in Airflow is a soft deadline on a task or
+DAG. When a task runs longer than its defined SLA duration, Airflow does two
+things: it records the miss in the sla_miss table in the metadata database, and
+it triggers the sla_miss_callback function if one is configured on the DAG. By
+default, it also sends an email to the addresses in the DAG's email field.
+
+Importantly, an SLA miss does not stop the task or mark it as failed. The task
+keeps running. The SLA is purely a monitoring mechanism — it tells you something
+is slower than expected so you can investigate, without interrupting the pipeline
+itself.
+
+----
+
+Q12. Should this DAG use catchup=True or catchup=False?
+
+catchup=True is the right choice here, and it follows directly from the
+idempotency requirement. Because the transform functions always produce the same
+output for the same input date, and because intermediate files are written to
+execution-date-scoped paths, running the pipeline for April 5th will never
+corrupt the results for April 3rd. You can safely let Airflow schedule backfill
+runs in parallel.
+
+catchup=False makes sense when a pipeline is stateful or additive — for example,
+if each run appends to a rolling counter that should only ever reflect today's
+data. In this case, the pipeline is purely a per-day batch transformation, so
+there's no risk in processing historical dates, and catchup=True gives us the
+ability to reprocess any missed day without manual intervention.
+
+
+--------------------------------------------------------------------------------
+TASK 3 — EXECUTORS AND SCALING (Airflow M9)
+--------------------------------------------------------------------------------
+
+Q13. Which Executor for local development?
+
+LocalExecutor. In local development you want parallelism (so you can test that
+tasks inside a TaskGroup actually run concurrently) but you don't want the
+overhead of standing up a Celery broker or a Kubernetes cluster. LocalExecutor
+runs each task as a separate subprocess on the same machine, which is exactly
+the right trade-off for a developer laptop or a single VM. It requires a real
+database backend (Postgres or MySQL) rather than SQLite, but that's a one-time
+setup cost.
+
+----
+
+Q14. Which Executor for 10 million rows and 50 parallel DAG runs?
+
+CeleryExecutor. At that scale you need to distribute task execution across
+multiple worker machines, and Celery is the mature, battle-tested way to do
+that in Airflow. You'd run a Redis or RabbitMQ broker to queue tasks, and scale
+out worker nodes independently of the scheduler. In Cloud Composer this maps
+directly to scaling the number of worker nodes in the environment, which you can
+do without redeploying the DAG.
+
+KubernetesExecutor is also viable at this scale, but it has higher task startup
+latency (spinning up a pod per task) which becomes a problem when you have many
+short tasks. For a pipeline with longer-running transform tasks like this one,
+that trade-off matters less, but CeleryExecutor remains the default choice for
+most production Composer setups.
+
+----
+
+Q15. CeleryExecutor vs KubernetesExecutor: worker provisioning
+
+With CeleryExecutor, workers are long-running processes that stay alive between
+tasks. You pre-provision a pool of worker VMs, and tasks are pulled from the
+queue by whichever worker is free. Workers share the same environment, which is
+simple to manage but means all tasks run in the same Python environment.
+
+With KubernetesExecutor, a fresh pod is spun up for every individual task and
+torn down when it finishes. There are no idle workers consuming resources between
+runs. The trade-off is that pod startup adds latency to every task, and managing
+per-task Docker images adds operational complexity. The upside is perfect
+isolation — each task can run in a completely different environment — which is
+valuable for pipelines that mix Python versions or dependency sets.
+
+----
+
+Q16. What Executor does Cloud Composer use by default, and can you change it?
+
+Cloud Composer uses CeleryExecutor by default. This makes sense given that
+Composer is designed for production workloads where parallel task execution
+across multiple workers is the norm.
+
+You can switch to KubernetesExecutor in Composer, but it requires creating a
+Composer 2 environment (Composer 1 only supports Celery). The change is made
+via the Airflow configuration overrides in the Composer environment settings —
+specifically setting core.executor to KubernetesExecutor. In practice, most
+teams stay on Celery unless they have a specific reason to need per-task pod
+isolation.
+
+----
+
+Q17. SequentialExecutor vs LocalExecutor — when would you use Sequential?
+
+SequentialExecutor runs one task at a time, in sequence, with no parallelism at
+all. It's the only executor that works with SQLite as the metadata backend, which
+means it's what you get out of the box when you install Airflow for the very
+first time without any configuration.
+
+The only real use case for SequentialExecutor is the first five minutes of
+learning Airflow — running a hello-world DAG to verify your installation works.
+For anything that resembles a real pipeline, even a simple one, you want
+LocalExecutor so you can observe whether your task dependencies and parallelism
+are wired correctly.
+
+
+--------------------------------------------------------------------------------
+TASK 4 — BIGQUERY ARCHITECTURE AND QUERYING (GCP M5)
+--------------------------------------------------------------------------------
+
+Q20. Partitioning strategy for raw_transactions
+
+Partition on transaction_date as a DATE column. This is the natural choice
+because almost every query against a transactions table is date-bounded — daily
+ETL jobs process one day at a time, analysts filter by month, finance reports
+run by quarter. Without partitioning, every query scans the entire table
+regardless of the date filter. With date partitioning, BigQuery prunes to only
+the relevant day partitions, which cuts both query cost and latency
+proportionally.
+
+At hundreds of millions of rows, the cost difference is significant. BigQuery
+charges per byte scanned, so a query filtering to a single day against a
+date-partitioned table might scan one day's worth of data instead of the full
+table — potentially a 1000x cost reduction on a three-year dataset.
+
+----
+
+Q21. What is clustering and which columns would you cluster on?
+
+Clustering is BigQuery's way of physically co-locating rows with similar values
+within each partition. After partitioning handles the coarse time-based pruning,
+clustering handles the finer-grained pruning within a partition. When you query
+with a filter or GROUP BY on a clustered column, BigQuery skips blocks that don't
+contain matching values.
+
+For raw_transactions, cluster on category first, then customer_segment. These
+are the two columns most likely to appear in WHERE clauses and GROUP BY statements
+in analytical queries — the revenue-by-category and return-rate-by-category
+queries from Task 4 are the exact workload clustering is designed for. You can
+specify up to four clustering columns, but two well-chosen ones are generally
+more useful than four mediocre ones.
+
+----
+
+Q22. How BigQuery separates storage and compute, and why it matters for cost
+
+In a traditional data warehouse, storage and compute are bundled together — you
+pay for a cluster of machines that both store your data and run your queries, and
+that cluster runs 24/7 whether you're querying it or not. BigQuery decouples
+these completely. Your data lives in Google's distributed storage layer (Colossus)
+and query compute is allocated on-demand from a separate serverless pool.
+
+For a daily ETL pipeline, this matters a lot. Your pipeline runs once a day for
+maybe 10-20 minutes. With a traditional warehouse you'd be paying for idle
+compute for the other 23 hours and 40 minutes. With BigQuery's on-demand model
+you pay only for the bytes scanned by your queries. The storage cost is flat and
+predictable. The compute cost scales with actual usage, not with time. For
+bursty batch workloads like daily ETL, this is almost always cheaper than
+reserved compute, and it removes the operational burden of managing cluster
+capacity.
+
+
+--------------------------------------------------------------------------------
+TASK 5 — CLOUD COMPOSER DEPLOYMENT (GCP M6)
+--------------------------------------------------------------------------------
+
+Q23. How to deploy the DAG to Cloud Composer
+
+Cloud Composer stores DAGs in a GCS bucket that it automatically syncs to the
+Airflow scheduler. Every Composer environment has a dedicated bucket, and within
+that bucket there's a /dags folder. Anything you upload to that folder appears
+in the Airflow UI within a minute or two.
+
+To deploy etl_transactions_pipeline.py, you copy it to the bucket:
+
+    gsutil cp etl_transactions_pipeline.py gs://<composer-bucket>/dags/
+
+If the DAG imports from transaction_logic.py, that file also needs to be
+accessible. You can either place it in the same /dags folder (Airflow adds it to
+the Python path) or package it as a plugin. For a single helper module, the
+/dags folder is the simplest approach.
+
+----
+
+Q24. Standalone Airflow vs Cloud Composer: infrastructure differences
+
+On standalone Airflow, you own everything — provisioning the VM or container,
+installing Airflow and its dependencies, configuring the metadata database
+(usually Postgres), setting up the Celery workers, managing upgrades, and
+handling failures. It's flexible but operationally heavy.
+
+Cloud Composer is managed Airflow on GCP. Google handles the infrastructure:
+the scheduler runs on GKE, the metadata database is a managed Cloud SQL instance,
+workers auto-scale based on the workload, and upgrades are applied with a button
+click. Your DAG file is identical in both cases — Composer doesn't require any
+Composer-specific code. The main practical difference is that in Composer you
+interact with infrastructure through the GCP console and gcloud commands rather
+than SSH and systemctl.
+
+----
+
+Q25. Running a BigQuery job directly from Airflow in Composer
+
+Use the BigQueryInsertJobOperator from the apache-airflow-providers-google
+package. Its key parameters are:
+
+  - configuration: a dict that mirrors the BigQuery Jobs API request body.
+    For a query job, this includes query.query (your SQL), query.useLegacySql
+    (set to False for standard SQL), and optionally query.destinationTable.
+  - project_id: your GCP project.
+  - gcp_conn_id: the Airflow connection ID for your GCP credentials
+    (defaults to google_cloud_default, which Composer pre-configures for you).
+
+Example:
+
+    BigQueryInsertJobOperator(
+        task_id="run_category_summary_query",
+        configuration={
+            "query": {
+                "query": "SELECT category, SUM(...) FROM ...",
+                "useLegacySql": False,
+                "destinationTable": {
+                    "projectId": "your-project",
+                    "datasetId": "ecomm_reporting",
+                    "tableId":   "category_summary",
+                },
+                "writeDisposition": "WRITE_TRUNCATE",
+            }
+        },
+    )
+
+The writeDisposition: WRITE_TRUNCATE makes this idempotent — reruns overwrite
+the destination table rather than appending to it.
+
+----
+
+Q26. Composer setting to add worker nodes for a slow transform group
+
+Adjust the worker.min-count and worker.max-count settings in the Composer
+environment's autoscaling configuration (in Composer 2) or the number of
+workers in the environment node pool (in Composer 1).
+
+In Composer 2, autoscaling is the default behavior. If the transform TaskGroup
+is consistently slow because workers are saturated, increasing worker.min-count
+ensures more workers are always available rather than waiting for the autoscaler
+to react. Increasing worker.max-count raises the ceiling for peak load. You can
+update these via the GCP console or:
+
+    gcloud composer environments update <env-name> \
+        --location <region> \
+        --autoscaling-min-workers 3 \
+        --autoscaling-max-workers 10
+
+----
+
+Q27. How to backfill April 2024 transactions with Airflow
+
+Use the airflow dags backfill CLI command with a start and end date:
+
+    airflow dags backfill \
+        ecommerce_etl_pipeline \
+        --start-date 2024-04-01 \
+        --end-date   2024-04-30
+
+This triggers one DAG run for each day in the range, using each day's date as
+the execution_date. Because catchup=True is set and the pipeline is idempotent,
+you can safely run this against the live environment without risk of corrupting
+current data.
+
+The --reset-dagruns flag can be added if those runs already exist in a failed
+state and you want Airflow to clear and rerun them rather than skip them. In
+Cloud Composer you would run this command via the Airflow CLI access through
+the Composer web server or by SSHing into the scheduler pod.
+
+================================================================================
+END OF ANSWERS
+================================================================================

@@ -1,0 +1,8 @@
+# Core Airflow framework
+apache-airflow==2.9.0
+
+# Google Cloud provider for BigQuery and Cloud Storage operators
+apache-airflow-providers-google==10.17.0
+
+# (Optional) For local testing of the business logic outside of Airflow
+pytest==8.1.1
